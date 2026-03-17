@@ -38,7 +38,7 @@ Returns:
 Positive rate = longs pay shorts. Negative rate = shorts pay longs.
 Use searchContracts first to get the aliceId.`,
       inputSchema: z.object({
-        aliceId: z.string().describe('Contract identifier from searchContracts (e.g. "bybit-BTCUSDT")'),
+        aliceId: z.string().describe('Contract identifier from searchContracts (e.g. "bybit-BTC_USDT.USDT")'),
         source: z.string().optional().describe(sourceDesc),
       }),
       execute: async ({ aliceId, source }) => {
@@ -59,7 +59,7 @@ Returns bids and asks sorted by price. Each level is [price, amount].
 Use this to evaluate liquidity and potential slippage before placing large orders.
 Use searchContracts first to get the aliceId.`,
       inputSchema: z.object({
-        aliceId: z.string().describe('Contract identifier from searchContracts (e.g. "bybit-BTCUSDT")'),
+        aliceId: z.string().describe('Contract identifier from searchContracts (e.g. "bybit-BTC_USDT.USDT")'),
         limit: z
           .number()
           .int()

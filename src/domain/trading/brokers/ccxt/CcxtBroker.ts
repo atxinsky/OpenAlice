@@ -3,7 +3,7 @@
  *
  * Direct implementation against ccxt unified API.
  * Takes IBKR Order objects, reads relevant fields, ignores the rest.
- * aliceId format: "{exchange}-{market.id}" (e.g. "bybit-BTCUSDT").
+ * aliceId format: "{exchange}-{encodedSymbol}" (e.g. "bybit-BTC_USDT.USDT").
  */
 
 import ccxt from 'ccxt'

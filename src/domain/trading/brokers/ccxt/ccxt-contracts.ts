@@ -3,12 +3,27 @@
  *
  * Pure functions parameterized by (markets, exchangeName) —
  * no dependency on the CcxtBroker instance.
- * Now returns IBKR Contract class instances with aliceId extension.
+ *
+ * aliceId format: "{exchange}-{encodedSymbol}"
+ * where encodedSymbol = market.symbol with / → _ and : → .
+ * e.g. "bybit-ETH_USDT.USDT" for "ETH/USDT:USDT"
  */
 
 import { Contract, OrderState } from '@traderalice/ibkr'
 import '../../contract-ext.js'
 import type { CcxtMarket } from './ccxt-types.js'
+
+// ---- Symbol encoding for aliceId ----
+
+/** CCXT symbol → aliceId suffix (escape / and :) */
+export function encodeSymbol(symbol: string): string {
+  return symbol.replace(/\//g, '_').replace(/:/g, '.')
+}
+
+/** aliceId suffix → CCXT symbol (unescape) */
+export function decodeSymbol(encoded: string): string {
+  return encoded.replace(/_/g, '/').replace(/\./g, ':')
+}
 
 // ---- Type mapping ----
 
@@ -45,11 +60,11 @@ export function makeOrderState(ccxtStatus: string | undefined): OrderState {
 
 /**
  * Convert a CcxtMarket to an IBKR Contract.
- * aliceId = "{exchangeName}-{market.id}"
+ * aliceId = "{exchangeName}-{encodeSymbol(market.symbol)}"
  */
 export function marketToContract(market: CcxtMarket, exchangeName: string): Contract {
   const c = new Contract()
-  c.aliceId = `${exchangeName}-${market.id}`
+  c.aliceId = `${exchangeName}-${encodeSymbol(market.symbol)}`
   c.symbol = market.base
   c.secType = ccxtTypeToSecType(market.type)
   c.exchange = exchangeName
@@ -59,11 +74,11 @@ export function marketToContract(market: CcxtMarket, exchangeName: string): Cont
   return c
 }
 
-/** Parse aliceId → raw nativeId (market.id) part. */
+/** Parse aliceId → CCXT unified symbol. */
 export function aliceIdToCcxt(aliceId: string, exchangeName: string): string | null {
   const prefix = `${exchangeName}-`
   if (!aliceId.startsWith(prefix)) return null
-  return aliceId.slice(prefix.length)
+  return decodeSymbol(aliceId.slice(prefix.length))
 }
 
 /**
@@ -75,15 +90,10 @@ export function contractToCcxt(
   markets: Record<string, CcxtMarket>,
   exchangeName: string,
 ): string | null {
-  // 1. aliceId → market.id → look up in markets
+  // 1. aliceId → decode → direct markets lookup (unique, no ambiguity)
   if (contract.aliceId) {
     const ccxtSymbol = aliceIdToCcxt(contract.aliceId, exchangeName)
     if (ccxtSymbol && markets[ccxtSymbol]) return ccxtSymbol
-    // aliceId uses market.id, but markets are indexed by ccxt symbol
-    // search by market.id
-    for (const m of Object.values(markets)) {
-      if (`${exchangeName}-${m.id}` === contract.aliceId) return m.symbol
-    }
     return null
   }
 
