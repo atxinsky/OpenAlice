@@ -7,6 +7,7 @@ import { McpPlugin } from './server/mcp.js'
 import { TelegramPlugin } from './connectors/telegram/index.js'
 import { WebPlugin } from './connectors/web/index.js'
 import { McpAskPlugin } from './connectors/mcp-ask/index.js'
+import { DiscordWebhookConnector } from './connectors/discord/discord-webhook-connector.js'
 import { createThinkingTools } from './tool/thinking.js'
 import { AccountManager } from './domain/trading/index.js'
 import { createTradingTools } from './tool/trading.js'
@@ -208,6 +209,14 @@ async function main() {
   // ==================== Connector Center ====================
 
   const connectorCenter = new ConnectorCenter(eventLog)
+
+  // ==================== Discord Webhook ====================
+
+  const discordWebhookUrl = process.env.DISCORD_WEBHOOK_URL
+  if (discordWebhookUrl) {
+    connectorCenter.register(new DiscordWebhookConnector(discordWebhookUrl))
+    console.log('discord: webhook connector registered')
+  }
 
   // ==================== Cron Lifecycle ====================
 
