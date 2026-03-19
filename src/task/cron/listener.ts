@@ -63,9 +63,9 @@ export function createCronListener(opts: CronListenerOpts): CronListener {
         historyPreamble: 'The following is the recent cron session conversation. This is an automated cron job execution.',
       })
 
-      // Send notification through the last-interacted connector
+      // Broadcast notification to all push-capable connectors (Telegram, Discord, etc.)
       try {
-        await connectorCenter.notify(result.text, {
+        await connectorCenter.broadcast(result.text, {
           media: result.media,
           source: 'cron',
         })

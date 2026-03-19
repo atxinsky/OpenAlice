@@ -212,7 +212,10 @@ async function main() {
 
   // ==================== Discord Webhook ====================
 
-  const discordWebhookUrl = process.env.DISCORD_WEBHOOK_URL
+  const discordCfg = config.connectors.discord
+  const discordWebhookUrl = (discordCfg.enabled && discordCfg.webhookUrl)
+    ? discordCfg.webhookUrl
+    : process.env.DISCORD_WEBHOOK_URL
   if (discordWebhookUrl) {
     connectorCenter.register(new DiscordWebhookConnector(discordWebhookUrl))
     console.log('discord: webhook connector registered')

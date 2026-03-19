@@ -517,6 +517,14 @@ export class UnifiedTradingAccount {
   }
 
   async getQuote(contract: Contract): Promise<Quote> {
+    // Parse aliceId → localSymbol/symbol so the broker can resolve the contract
+    if (contract.aliceId && !contract.localSymbol) {
+      const parsed = UnifiedTradingAccount.parseAliceId(contract.aliceId)
+      if (parsed) {
+        contract.localSymbol = parsed.nativeKey
+        contract.symbol = parsed.nativeKey
+      }
+    }
     const quote = await this._callBroker(() => this.broker.getQuote(contract))
     this.stampAliceId(quote.contract)
     return quote

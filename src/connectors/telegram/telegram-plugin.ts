@@ -35,6 +35,9 @@ export class TelegramPlugin implements Plugin {
   /** Throttle: last time we sent an auth-guidance reply per chatId. */
   private authReplyThrottle = new Map<number, number>()
 
+  /** Bot's own username, populated after bot.init() */
+  private botUsername = ''
+
   constructor(
     config: Omit<TelegramConfig, 'pollingTimeout'> & { pollingTimeout?: number },
     agentSdkConfig: AgentSdkConfig = {},
@@ -169,6 +172,7 @@ export class TelegramPlugin implements Plugin {
 
     // ── Initialize and get bot info ──
     await bot.init()
+    this.botUsername = bot.botInfo.username
     const aiConfig = await readAIBackend()
     console.log(`telegram plugin: connected as @${bot.botInfo.username} (backend: ${aiConfig.backend})`)
 
@@ -220,6 +224,12 @@ export class TelegramPlugin implements Plugin {
 
   private async handleMessage(engineCtx: EngineContext, message: ParsedMessage) {
     try {
+      // In group/supergroup/channel chats, only respond when @mentioned
+      const chatType = message.raw.chat.type
+      if (chatType === 'group' || chatType === 'supergroup' || chatType === 'channel') {
+        if (!this.isBotMentioned(message)) return
+      }
+
       // Build prompt from message content
       const prompt = this.buildPrompt(message)
       if (!prompt) return
@@ -319,6 +329,20 @@ export class TelegramPlugin implements Plugin {
       `Heartbeat: ${enabled ? 'ON' : 'OFF'}\n\nToggle heartbeat self-check:`,
       { reply_markup: keyboard },
     )
+  }
+
+  /**
+   * Returns true if the bot's @username appears in the message entities.
+   * Uses Telegram's entity list to detect mentions accurately.
+   */
+  private isBotMentioned(message: ParsedMessage): boolean {
+    const entities = message.raw.entities ?? message.raw.caption_entities ?? []
+    const text = message.raw.text ?? message.raw.caption ?? ''
+    return entities.some((e) => {
+      if (e.type !== 'mention') return false
+      const mentioned = text.slice(e.offset, e.offset + e.length)
+      return mentioned.toLowerCase() === `@${this.botUsername.toLowerCase()}`
+    })
   }
 
   private buildPrompt(message: ParsedMessage): string | null {
