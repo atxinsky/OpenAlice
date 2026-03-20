@@ -20,31 +20,36 @@ export class TelegramConnector implements Connector {
   readonly to: string
   readonly capabilities: ConnectorCapabilities = { push: true, media: true }
 
+  private readonly chatIds: number[]
+
   constructor(
     private readonly bot: Bot,
-    private readonly chatId: number,
+    chatId: number | number[],
   ) {
-    this.to = String(chatId)
+    this.chatIds = Array.isArray(chatId) ? chatId : [chatId]
+    this.to = this.chatIds.join(',')
   }
 
   async send(payload: SendPayload): Promise<SendResult> {
-    // Send media first (photos)
-    if (payload.media && payload.media.length > 0) {
-      for (const attachment of payload.media) {
-        try {
-          const buf = await readFile(attachment.path)
-          await this.bot.api.sendPhoto(this.chatId, new InputFile(buf, 'screenshot.jpg'))
-        } catch (err) {
-          console.error('telegram: failed to send photo:', err)
+    for (const chatId of this.chatIds) {
+      // Send media first (photos)
+      if (payload.media && payload.media.length > 0) {
+        for (const attachment of payload.media) {
+          try {
+            const buf = await readFile(attachment.path)
+            await this.bot.api.sendPhoto(chatId, new InputFile(buf, 'screenshot.jpg'))
+          } catch (err) {
+            console.error('telegram: failed to send photo:', err)
+          }
         }
       }
-    }
 
-    // Send text with chunking
-    if (payload.text) {
-      const chunks = splitMessage(payload.text, MAX_MESSAGE_LENGTH)
-      for (const chunk of chunks) {
-        await this.bot.api.sendMessage(this.chatId, chunk)
+      // Send text with chunking
+      if (payload.text) {
+        const chunks = splitMessage(payload.text, MAX_MESSAGE_LENGTH)
+        for (const chunk of chunks) {
+          await this.bot.api.sendMessage(chatId, chunk)
+        }
       }
     }
 

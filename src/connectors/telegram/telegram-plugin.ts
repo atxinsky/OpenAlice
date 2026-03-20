@@ -177,9 +177,9 @@ export class TelegramPlugin implements Plugin {
     console.log(`telegram plugin: connected as @${bot.botInfo.username} (backend: ${aiConfig.backend})`)
 
     // ── Register connector for outbound delivery (heartbeat / cron responses) ──
+    // Pass ALL allowedChatIds so broadcast reaches every configured channel.
     if (this.config.allowedChatIds.length > 0) {
-      const deliveryChatId = this.config.allowedChatIds[0]
-      this.unregisterConnector = this.connectorCenter!.register(new TelegramConnector(bot, deliveryChatId))
+      this.unregisterConnector = this.connectorCenter!.register(new TelegramConnector(bot, this.config.allowedChatIds))
     }
 
     // ── Start polling ──
