@@ -197,5 +197,117 @@ Recommended timeframe: "4h" for crypto entry signals; "1d" for regime / SMA200 c
         }
       },
     }),
+
+    tradeQualityScore: tool({
+      description: `Score a potential trade (0-100) based on AutoAI research statistics.
+
+Combines multiple dimensions from historical research data:
+  - Support type quality (SMA200 best at 50%, round numbers useless at 28%)
+  - Volume confirmation (vol_ratio > 1.5 = 66% win rate vs 47%)
+  - MACD directional filter (ETH 4h: +0.21%/bar edge when hist > 0)
+  - RSI position (overbought > 75 has 56% short success)
+  - Session quality (US session best, Thursday weakest day)
+  - Regime alignment (from regime matrix)
+
+Input: a signalSnapshot result (or manual values). Output: score + breakdown.
+This is a decision-support tool, not a trading rule. Alice decides.`,
+      inputSchema: z.object({
+        price: z.number().describe('Current price'),
+        atr_14: z.number().describe('ATR(14) value'),
+        rsi_14: z.number().describe('RSI(14) value'),
+        macd_hist: z.number().describe('MACD histogram value'),
+        vol_ratio: z.number().nullable().describe('Volume ratio (current/avg20)'),
+        near_sma200: z.boolean().nullable().describe('Within 1.5% of SMA200'),
+        sma50: z.number().nullable().describe('SMA50 value'),
+        sma200: z.number().nullable().describe('SMA200 value'),
+        direction: z.enum(['long', 'short']).describe('Intended trade direction'),
+        symbol: z.string().optional().describe('Symbol for context (e.g. ETH/USDT)'),
+      }),
+      execute: async ({ price, atr_14, rsi_14, macd_hist, vol_ratio, near_sma200, sma50, sma200, direction }) => {
+        const breakdown: Array<{ factor: string; score: number; max: number; note: string }> = []
+
+        // 1. Support/Resistance quality (max 20)
+        if (direction === 'long' && near_sma200) {
+          breakdown.push({ factor: 'SMA200 support', score: 20, max: 20, note: 'hold rate ~50% BTC / 41% ETH' })
+        } else if (direction === 'long') {
+          breakdown.push({ factor: 'No SMA200 support', score: 5, max: 20, note: 'not near key support' })
+        } else {
+          breakdown.push({ factor: 'Short — support N/A', score: 10, max: 20, note: 'resistance stats weaker' })
+        }
+
+        // 2. Volume confirmation (max 25)
+        if (vol_ratio !== null && vol_ratio > 1.5) {
+          breakdown.push({ factor: 'Volume surge', score: 25, max: 25, note: `vol_ratio ${vol_ratio.toFixed(1)}x — win rate 66% vs 47%` })
+        } else if (vol_ratio !== null) {
+          breakdown.push({ factor: 'No volume surge', score: 5, max: 25, note: `vol_ratio ${vol_ratio.toFixed(1)}x — near random` })
+        } else {
+          breakdown.push({ factor: 'Volume unknown', score: 10, max: 25, note: 'no volume data' })
+        }
+
+        // 3. MACD filter (max 15)
+        const macdAligned = (direction === 'long' && macd_hist > 0) || (direction === 'short' && macd_hist < 0)
+        if (macdAligned) {
+          breakdown.push({ factor: 'MACD aligned', score: 15, max: 15, note: `hist ${macd_hist > 0 ? '+' : ''}${macd_hist.toFixed(2)} — ETH 4h edge +0.21%` })
+        } else {
+          breakdown.push({ factor: 'MACD against', score: -5, max: 15, note: 'trading against momentum' })
+        }
+
+        // 4. RSI position (max 15)
+        if (direction === 'long' && rsi_14 < 30) {
+          breakdown.push({ factor: 'RSI oversold', score: 10, max: 15, note: `RSI ${rsi_14.toFixed(1)} — weak signal but supportive` })
+        } else if (direction === 'short' && rsi_14 > 75) {
+          breakdown.push({ factor: 'RSI overbought', score: 15, max: 15, note: `RSI ${rsi_14.toFixed(1)} — 56% short success at >75` })
+        } else if ((direction === 'long' && rsi_14 > 70) || (direction === 'short' && rsi_14 < 30)) {
+          breakdown.push({ factor: 'RSI against', score: -10, max: 15, note: `RSI ${rsi_14.toFixed(1)} — wrong side` })
+        } else {
+          breakdown.push({ factor: 'RSI neutral', score: 5, max: 15, note: `RSI ${rsi_14.toFixed(1)}` })
+        }
+
+        // 5. Regime alignment (max 15)
+        if (sma50 !== null && sma200 !== null) {
+          const bullRegime = price > sma50 && sma50 > sma200
+          const bearRegime = price < sma50 && sma50 < sma200
+          if ((direction === 'long' && bullRegime) || (direction === 'short' && bearRegime)) {
+            breakdown.push({ factor: 'Regime aligned', score: 15, max: 15, note: direction === 'long' ? 'P > SMA50 > SMA200' : 'P < SMA50 < SMA200' })
+          } else if ((direction === 'long' && bearRegime) || (direction === 'short' && bullRegime)) {
+            breakdown.push({ factor: 'Regime AGAINST', score: -15, max: 15, note: 'trading against structural trend' })
+          } else {
+            breakdown.push({ factor: 'Regime mixed', score: 5, max: 15, note: 'range — no strong trend' })
+          }
+        } else {
+          breakdown.push({ factor: 'Regime unknown', score: 0, max: 15, note: 'insufficient MA data' })
+        }
+
+        // 6. Session (max 10) — based on UTC hour
+        const hour = new Date().getUTCHours()
+        if (hour >= 16 && hour < 24) {
+          breakdown.push({ factor: 'US session', score: 10, max: 10, note: 'highest avg return session' })
+        } else if (hour >= 8 && hour < 16) {
+          breakdown.push({ factor: 'Europe session', score: 7, max: 10, note: 'moderate quality' })
+        } else {
+          breakdown.push({ factor: 'Asia session', score: 3, max: 10, note: 'lowest avg return, slightly negative' })
+        }
+
+        // Day of week penalty
+        const dow = new Date().getUTCDay()
+        if (dow === 4) { // Thursday
+          breakdown.push({ factor: 'Thursday penalty', score: -5, max: 0, note: 'weakest day statistically' })
+        }
+
+        const totalScore = Math.max(0, Math.min(100, breakdown.reduce((sum, b) => sum + b.score, 0)))
+
+        return {
+          score: totalScore,
+          max_possible: 100,
+          grade: totalScore >= 70 ? 'A — strong setup' : totalScore >= 50 ? 'B — acceptable' : totalScore >= 30 ? 'C — weak, size down' : 'D — avoid',
+          breakdown,
+          suggested_stop: {
+            distance_2atr: parseFloat((atr_14 * 2).toFixed(2)),
+            distance_2p5atr: parseFloat((atr_14 * 2.5).toFixed(2)),
+            note: 'Use trailing stop 2ATR for exit (only positive EV method)',
+          },
+        }
+      },
+    }),
   }
 }
