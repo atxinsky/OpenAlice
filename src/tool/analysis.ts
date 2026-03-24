@@ -134,7 +134,25 @@ Recommended timeframe: "4h" for crypto entry signals; "1d" for regime / SMA200 c
       }),
       execute: async ({ asset, symbol, timeframe }) => {
         const context = buildContext(asset, equityClient, cryptoClient, currencyClient)
-        const data = await context.getHistoricalData(symbol, timeframe)
+
+        // Normalize symbol: "ETH/USDT" → "ETHUSD", "BTC/USDC" → "BTCUSD"
+        let normalizedSymbol = symbol
+        if (asset === 'crypto') {
+          normalizedSymbol = symbol
+            .replace('/', '')                       // remove slash
+            .replace(/USDT$|USDC$|BUSD$/, 'USD')   // map stable quote → USD
+            .toUpperCase()
+        }
+
+        // Normalize timeframe: "4h" → "1h", "1w" → "1W" (Yahoo Finance format)
+        const tfMap: Record<string, string> = {
+          '4h': '1h', '2h': '1h', '3h': '1h',
+          '1w': '1W', '1W': '1W',
+          '1m': '1M', '1M': '1M',
+        }
+        const normalizedTf = tfMap[timeframe] ?? timeframe
+
+        const data = await context.getHistoricalData(normalizedSymbol, normalizedTf)
 
         if (data.length < 30) {
           throw new Error(`Insufficient data: need at least 30 bars, got ${data.length}`)
@@ -143,7 +161,24 @@ Recommended timeframe: "4h" for crypto entry signals; "1d" for regime / SMA200 c
         const closes = data.map((d) => d.close)
         const highs = data.map((d) => d.high)
         const lows = data.map((d) => d.low)
-        const volumes = data.map((d) => d.volume ?? 0)
+
+        // yfinance intrabar (1h) crypto data often returns null volumes — a known provider limitation.
+        // When all intrabar volumes are null/zero, fall back to daily data for volume computation.
+        const rawVolumes = data.map((d) => d.volume)
+        const hasIntrabarVolume = rawVolumes.some((v) => v != null && v > 0)
+
+        let volumeData: Array<number | null> = rawVolumes
+        let vol_source = normalizedTf
+        if (!hasIntrabarVolume && asset === 'crypto') {
+          try {
+            const dailyData = await context.getHistoricalData(normalizedSymbol, '1d')
+            const dailyVols = dailyData.map((d) => d.volume)
+            if (dailyVols.some((v) => v != null && v > 0)) {
+              volumeData = dailyVols
+              vol_source = '1d'
+            }
+          } catch { /* fall through — volumeData stays as null intrabar series */ }
+        }
 
         const round = (n: number, dp = 4) => parseFloat(n.toFixed(dp))
 
@@ -163,13 +198,16 @@ Recommended timeframe: "4h" for crypto entry signals; "1d" for regime / SMA200 c
           ? Math.abs(price - sma200) / sma200 <= 0.015
           : null
 
-        const vol_latest = volumes[volumes.length - 1]
+        const validVolumes = volumeData.filter((v): v is number => v != null && v > 0)
+        const vol_latest = volumeData[volumeData.length - 1] ?? null
         let vol_avg20: number | null = null
         let vol_ratio: number | null = null
-        try {
-          vol_avg20 = Statistics.SMA(volumes, 20)
-          vol_ratio = round(vol_latest / vol_avg20)
-        } catch { /* insufficient data */ }
+        if (vol_latest !== null && vol_latest > 0 && validVolumes.length >= 20) {
+          try {
+            vol_avg20 = Statistics.SMA(validVolumes.slice(-20), 20)
+            vol_ratio = vol_avg20 > 0 ? round(vol_latest / vol_avg20) : null
+          } catch { /* insufficient data */ }
+        }
 
         return {
           symbol,
@@ -189,11 +227,173 @@ Recommended timeframe: "4h" for crypto entry signals; "1d" for regime / SMA200 c
           sma50: sma50 !== null ? round(sma50) : null,
           sma200: sma200 !== null ? round(sma200) : null,
           near_sma200,
-          vol_latest: round(vol_latest),
+          vol_latest: vol_latest !== null ? round(vol_latest) : null,
           vol_avg20: vol_avg20 !== null ? round(vol_avg20) : null,
           vol_ratio,
+          vol_source,
           stop_2atr: round(atr_14 * 2),
           stop_2p5atr: round(atr_14 * 2.5),
+        }
+      },
+    }),
+
+    positionSize: tool({
+      description: `Calculate optimal position size for a futures trade using fixed-risk model.
+
+Run this tool BEFORE every entry to determine exact sizing. Replaces manual spreadsheet math.
+
+Returns:
+  final_qty          — number of contracts/units to trade
+  risk_amount_usd    — actual dollars at risk (entry → stop)
+  implied_leverage   — effective leverage used
+  liquidation_price  — estimated forced liquidation level
+  margin_required    — collateral needed
+  rr_ratio           — reward-to-risk ratio (only if target_price provided)
+  warnings           — list of risk warnings (tight stop, bad R:R, leverage cap hit, etc.)
+  summary            — one-line human-readable trade summary
+
+Alice's fixed rules built in:
+  - Default max risk: 2% of bucket (~$100 for $5,000 bucket)
+  - Leverage hard cap: 10x default (configurable)
+  - If implied leverage > cap → qty reduced to fit, capped=true in output
+  - stop_pct < 0.3% → warns of noise stop-out risk
+  - R:R < 2.0 → warns to reconsider target or stop
+
+Use for both BTC bucket (USDC, $5,000) and ETH bucket (USDT, $5,000).`,
+      inputSchema: z.object({
+        bucket_size: z.number().describe('Total capital in this trade bucket (USDT or USDC), e.g. 5000'),
+        entry_price: z.number().describe('Intended entry price'),
+        stop_price: z.number().describe('Hard stop-loss price'),
+        direction: z.enum(['long', 'short']).describe('Trade direction'),
+        risk_pct: z.number().min(0.1).max(5).default(2.0).describe('Max risk as % of bucket (default 2.0 = 2%)'),
+        target_price: z.number().optional().describe('Take-profit price — enables R:R ratio calculation'),
+        leverage_cap: z.number().min(1).max(125).default(10).describe('Max leverage allowed (default 10x)'),
+        contract_size: z.number().default(1).describe('Contract multiplier (default 1 for standard crypto futures)'),
+      }),
+      execute: async ({ bucket_size, entry_price, stop_price, direction, risk_pct, target_price, leverage_cap, contract_size }) => {
+        // Direction validation
+        if (direction === 'long' && stop_price >= entry_price) {
+          return { error: 'Long trade: stop_price must be BELOW entry_price' }
+        }
+        if (direction === 'short' && stop_price <= entry_price) {
+          return { error: 'Short trade: stop_price must be ABOVE entry_price' }
+        }
+
+        const round = (n: number, dp = 4) => parseFloat(n.toFixed(dp))
+
+        // Core sizing: risk_amount = qty * stop_distance => qty = risk_amount / stop_distance
+        const max_risk_usd = round(bucket_size * risk_pct / 100, 2)
+        const stop_distance = round(Math.abs(entry_price - stop_price), 6)
+        const stop_pct = round(stop_distance / entry_price * 100, 3)
+        const qty_from_risk = max_risk_usd / stop_distance
+
+        // Leverage check
+        const notional_raw = qty_from_risk * entry_price * contract_size
+        const implied_lev_raw = notional_raw / bucket_size
+
+        let final_qty: number
+        let actual_leverage: number
+        let capped = false
+
+        if (implied_lev_raw > leverage_cap) {
+          // Cap leverage: max_notional = bucket_size * leverage_cap
+          final_qty = round((bucket_size * leverage_cap) / (entry_price * contract_size), 6)
+          actual_leverage = leverage_cap
+          capped = true
+        } else {
+          final_qty = round(qty_from_risk, 6)
+          actual_leverage = round(implied_lev_raw, 2)
+        }
+
+        const actual_notional = round(final_qty * entry_price * contract_size, 2)
+        const actual_risk = round(final_qty * stop_distance * contract_size, 2)
+        const margin_required = round(actual_notional / actual_leverage, 2)
+        const pct_of_bucket_risked = round(actual_risk / bucket_size * 100, 2)
+
+        // Liquidation price (simplified — no funding rate)
+        // Long: liq = entry * (1 - 1/leverage)
+        // Short: liq = entry * (1 + 1/leverage)
+        const liq_price = direction === 'long'
+          ? round(entry_price * (1 - 1 / actual_leverage), 4)
+          : round(entry_price * (1 + 1 / actual_leverage), 4)
+        const buffer_to_liq = round(Math.abs(entry_price - liq_price) / entry_price * 100, 2)
+
+        // Reward / R:R
+        let rr_ratio: number | null = null
+        let reward_usd: number | null = null
+        if (target_price !== undefined) {
+          if ((direction === 'long' && target_price <= entry_price) ||
+              (direction === 'short' && target_price >= entry_price)) {
+            return { error: 'target_price is on the wrong side of entry_price for this direction' }
+          }
+          const reward_distance = Math.abs(target_price - entry_price)
+          rr_ratio = round(reward_distance / stop_distance, 2)
+          reward_usd = round(final_qty * reward_distance * contract_size, 2)
+        }
+
+        // Warnings
+        const warnings: string[] = []
+        if (capped) {
+          warnings.push(`Leverage capped at ${leverage_cap}x (original implied ${round(implied_lev_raw, 1)}x) — qty reduced, actual risk now $${actual_risk} vs target $${max_risk_usd}`)
+        }
+        if (stop_pct < 0.3) {
+          warnings.push(`Stop too tight (${stop_pct}% < 0.3%) — high risk of noise-triggered stop-out`)
+        }
+        if (rr_ratio !== null && rr_ratio < 2) {
+          warnings.push(`R:R = ${rr_ratio}:1 is below 2.0 — consider widening target or tightening stop`)
+        }
+        if (buffer_to_liq < stop_pct * 2) {
+          warnings.push(`Liquidation price $${liq_price} is close to stop $${stop_price} — ensure stop fires BEFORE liquidation`)
+        }
+        if (actual_leverage < 1.5) {
+          warnings.push(`Very low effective leverage (${actual_leverage}x) — consider if spot is more appropriate`)
+        }
+
+        return {
+          // Core sizing
+          final_qty: round(final_qty, 4),
+          direction,
+          entry_price,
+          stop_price,
+          stop_distance,
+          stop_pct,
+
+          // Risk
+          max_risk_usd,
+          risk_amount_usd: actual_risk,
+          risk_pct_of_bucket: pct_of_bucket_risked,
+
+          // Leverage & margin
+          notional_usd: actual_notional,
+          implied_leverage: round(actual_leverage, 2),
+          margin_required_usd: margin_required,
+          leverage_capped: capped,
+
+          // Liquidation
+          liquidation_price: liq_price,
+          buffer_to_liq_pct: buffer_to_liq,
+
+          // Reward (optional)
+          target_price: target_price ?? null,
+          reward_usd,
+          rr_ratio,
+
+          // Context
+          bucket_size,
+          risk_pct_target: risk_pct,
+
+          // Warnings
+          warnings,
+
+          // One-line summary
+          summary: [
+            `${direction.toUpperCase()} ${round(final_qty, 4)} units @ $${entry_price}`,
+            `| Stop $${stop_price} (${stop_pct}%)`,
+            `| Risk $${actual_risk} / $${max_risk_usd} target (${pct_of_bucket_risked}% of bucket)`,
+            `| Lev ${round(actual_leverage, 1)}x | Margin $${margin_required}`,
+            `| Liq $${liq_price} (${buffer_to_liq}% buffer)`,
+            rr_ratio !== null ? `| R:R ${rr_ratio}:1 (reward $${reward_usd})` : '',
+          ].filter(Boolean).join(' '),
         }
       },
     }),

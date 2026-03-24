@@ -220,12 +220,12 @@ mkdir -p runtime cache/equity
 info "同步 Tier 5 默认模板..."
 mkdir -p default/skills
 
-[ -f "$SOURCE_ROOT/data/default/persona.default.md" ] && \
-  cp "$SOURCE_ROOT/data/default/persona.default.md" "$BACKUP_DIR/default/" && \
+[ -f "$SOURCE_ROOT/default/persona.default.md" ] && \
+  cp "$SOURCE_ROOT/default/persona.default.md" "$BACKUP_DIR/default/" && \
   info "  copied: default/persona.default.md"
 
-[ -f "$SOURCE_ROOT/data/default/heartbeat.default.md" ] && \
-  cp "$SOURCE_ROOT/data/default/heartbeat.default.md" "$BACKUP_DIR/default/" && \
+[ -f "$SOURCE_ROOT/default/heartbeat.default.md" ] && \
+  cp "$SOURCE_ROOT/default/heartbeat.default.md" "$BACKUP_DIR/default/" && \
   info "  copied: default/heartbeat.default.md"
 
 for skill_file in "$SOURCE_ROOT"/data/default/skills/*.md; do

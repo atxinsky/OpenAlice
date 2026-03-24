@@ -37,9 +37,13 @@ import {
 /** Map IBKR orderType codes to CCXT order type strings. */
 function ibkrOrderTypeToCcxt(orderType: string): string {
   switch (orderType) {
-    case 'MKT': return 'market'
-    case 'LMT': return 'limit'
-    default: return orderType.toLowerCase()
+    case 'MKT':       return 'market'
+    case 'LMT':       return 'limit'
+    case 'STP':       return 'stop_market'   // Binance futures: STOP_MARKET
+    case 'STP LMT':   return 'stop'          // Binance futures: STOP (stop_limit)
+    case 'TRAIL':     return 'trailing_stop_market'
+    case 'TRAIL LIMIT': return 'trailing_stop'
+    default:          return orderType.toLowerCase()
   }
 }
 
@@ -309,12 +313,22 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
       const ccxtOrderType = ibkrOrderTypeToCcxt(order.orderType)
       const side = order.action.toLowerCase() as 'buy' | 'sell'
 
+      // Inject stopPrice for all stop-type orders (Binance and most exchanges require this in params)
+      const isStopOrder = ['stop', 'stop_limit', 'stop_market', 'trailing_stop', 'trailing_stop_limit'].includes(ccxtOrderType)
+      if (isStopOrder && order.auxPrice !== UNSET_DOUBLE) {
+        params.stopPrice = order.auxPrice
+      }
+
+      // Pass limit price for limit orders and stop_limit orders
+      const needsLimitPrice = (ccxtOrderType === 'limit' || ccxtOrderType === 'stop_limit') && order.lmtPrice !== UNSET_DOUBLE
+      const ccxtPrice = needsLimitPrice ? order.lmtPrice : undefined
+
       const ccxtOrder = await this.exchange.createOrder(
         ccxtSymbol,
         ccxtOrderType,
         side,
         parseFloat(size),
-        ccxtOrderType === 'limit' && order.lmtPrice !== UNSET_DOUBLE ? order.lmtPrice : undefined,
+        ccxtPrice,
         params,
       )
 
@@ -572,7 +586,7 @@ export class CcxtBroker implements IBroker<CcxtBrokerMeta> {
   getCapabilities(): AccountCapabilities {
     return {
       supportedSecTypes: ['CRYPTO'],
-      supportedOrderTypes: ['MKT', 'LMT'],
+      supportedOrderTypes: ['MKT', 'LMT', 'STP', 'STP LMT', 'TRAIL', 'TRAIL LIMIT'],
     }
   }
 
