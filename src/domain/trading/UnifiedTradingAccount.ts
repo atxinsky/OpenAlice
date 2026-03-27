@@ -58,6 +58,8 @@ export interface UnifiedTradingAccountOptions {
   savedState?: GitExportState
   onCommit?: (state: GitExportState) => void | Promise<void>
   onHealthChange?: (accountId: string, health: BrokerHealthInfo) => void
+  onPostPush?: (accountId: string) => void | Promise<void>
+  onPostReject?: (accountId: string) => void | Promise<void>
 }
 
 // ==================== Stage param types ====================
@@ -108,6 +110,8 @@ export class UnifiedTradingAccount {
 
   private readonly _getState: () => Promise<GitState>
   private readonly _onHealthChange?: (accountId: string, health: BrokerHealthInfo) => void
+  private readonly _onPostPush?: (accountId: string) => void | Promise<void>
+  private readonly _onPostReject?: (accountId: string) => void | Promise<void>
 
   // ---- Health tracking ----
   private static readonly DEGRADED_THRESHOLD = 3
@@ -129,6 +133,8 @@ export class UnifiedTradingAccount {
     this.id = broker.id
     this.label = broker.label
     this._onHealthChange = options.onHealthChange
+    this._onPostPush = options.onPostPush
+    this._onPostReject = options.onPostReject
 
     // Wire internals
     this._getState = async (): Promise<GitState> => {
@@ -352,9 +358,10 @@ export class UnifiedTradingAccount {
   stagePlaceOrder(params: StagePlaceOrderParams): AddResult {
     // Resolve aliceId → full contract via broker (fills secType, exchange, currency, conId, etc.)
     const parsed = UnifiedTradingAccount.parseAliceId(params.aliceId)
-    const contract = parsed
-      ? this.broker.resolveNativeKey(parsed.nativeKey)
-      : new Contract()
+    if (!parsed) {
+      throw new Error(`Invalid aliceId "${params.aliceId}". Use searchContracts to get a valid contract identifier (expected format: "accountId|nativeKey").`)
+    }
+    const contract = this.broker.resolveNativeKey(parsed.nativeKey)
     contract.aliceId = params.aliceId
     if (params.symbol) contract.symbol = params.symbol
 
@@ -367,7 +374,7 @@ export class UnifiedTradingAccount {
     if (params.notional != null) order.cashQty = params.notional
     if (params.price != null) order.lmtPrice = params.price
     if (params.stopPrice != null) order.auxPrice = params.stopPrice
-    if (params.trailingAmount != null) order.auxPrice = params.trailingAmount
+    if (params.trailingAmount != null) order.trailStopPrice = params.trailingAmount
     if (params.trailingPercent != null) order.trailingPercent = params.trailingPercent
     if (params.goodTillDate != null) order.goodTillDate = params.goodTillDate
     if (params.extendedHours) order.outsideRth = true
@@ -382,7 +389,7 @@ export class UnifiedTradingAccount {
     if (params.qty != null) changes.totalQuantity = new Decimal(String(params.qty))
     if (params.price != null) changes.lmtPrice = params.price
     if (params.stopPrice != null) changes.auxPrice = params.stopPrice
-    if (params.trailingAmount != null) changes.auxPrice = params.trailingAmount
+    if (params.trailingAmount != null) changes.trailStopPrice = params.trailingAmount
     if (params.trailingPercent != null) changes.trailingPercent = params.trailingPercent
     if (params.type != null) changes.orderType = toIbkrOrderType(params.type)
     if (params.timeInForce != null) changes.tif = toIbkrTif(params.timeInForce)
@@ -393,9 +400,10 @@ export class UnifiedTradingAccount {
 
   stageClosePosition(params: StageClosePositionParams): AddResult {
     const parsed = UnifiedTradingAccount.parseAliceId(params.aliceId)
-    const contract = parsed
-      ? this.broker.resolveNativeKey(parsed.nativeKey)
-      : new Contract()
+    if (!parsed) {
+      throw new Error(`Invalid aliceId "${params.aliceId}". Use searchContracts to get a valid contract identifier (expected format: "accountId|nativeKey").`)
+    }
+    const contract = this.broker.resolveNativeKey(parsed.nativeKey)
     contract.aliceId = params.aliceId
     if (params.symbol) contract.symbol = params.symbol
 
@@ -423,11 +431,15 @@ export class UnifiedTradingAccount {
     if (this.health === 'offline') {
       throw new Error(`Account "${this.label}" is offline. Cannot execute trades.`)
     }
-    return this.git.push()
+    const result = await this.git.push()
+    Promise.resolve(this._onPostPush?.(this.id)).catch(() => {})
+    return result
   }
 
-  reject(reason?: string): Promise<RejectResult> {
-    return this.git.reject(reason)
+  async reject(reason?: string): Promise<RejectResult> {
+    const result = await this.git.reject(reason)
+    Promise.resolve(this._onPostReject?.(this.id)).catch(() => {})
+    return result
   }
 
   // ==================== Git queries ====================

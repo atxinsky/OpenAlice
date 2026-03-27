@@ -9,7 +9,7 @@ import { WebPlugin } from './connectors/web/index.js'
 import { McpAskPlugin } from './connectors/mcp-ask/index.js'
 import { DiscordWebhookConnector } from './connectors/discord/discord-webhook-connector.js'
 import { createThinkingTools } from './tool/thinking.js'
-import { AccountManager } from './domain/trading/index.js'
+import { AccountManager, createSnapshotService, createSnapshotScheduler } from './domain/trading/index.js'
 import { createTradingTools } from './tool/trading.js'
 import { Brain } from './domain/brain/index.js'
 import { createBrainTools } from './tool/brain.js'
@@ -85,6 +85,14 @@ async function main() {
     await accountManager.initAccount(accCfg)
   }
   accountManager.registerCcxtToolsIfNeeded()
+
+  // ==================== Snapshot ====================
+
+  const snapshotService = createSnapshotService({ accountManager, eventLog })
+  accountManager.setSnapshotHooks({
+    onPostPush: (id) => { snapshotService.takeSnapshot(id, 'post-push') },
+    onPostReject: (id) => { snapshotService.takeSnapshot(id, 'post-reject') },
+  })
 
   // ==================== Brain ====================
 
@@ -232,6 +240,14 @@ async function main() {
   cronListener.start()
   console.log('cron: engine + listener started')
 
+  // ==================== Snapshot Scheduler ====================
+
+  const snapshotScheduler = createSnapshotScheduler({ snapshotService, cronEngine, eventLog, config: config.snapshot })
+  await snapshotScheduler.start()
+  if (config.snapshot.enabled) {
+    console.log(`snapshot: scheduler started (every ${config.snapshot.every})`)
+  }
+
   // ==================== Heartbeat ====================
 
   const heartbeat = createHeartbeat({
@@ -371,7 +387,7 @@ async function main() {
 
   const ctx: EngineContext = {
     config, connectorCenter, agentCenter, eventLog, toolCallLog, heartbeat, cronEngine, toolCenter,
-    accountManager,
+    accountManager, snapshotService,
     reconnectConnectors,
   }
 
@@ -388,6 +404,7 @@ async function main() {
   const shutdown = async () => {
     stopped = true
     newsCollector?.stop()
+    snapshotScheduler.stop()
     heartbeat.stop()
     cronListener.stop()
     cronEngine.stop()
