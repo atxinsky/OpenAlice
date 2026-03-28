@@ -70,6 +70,8 @@ TIER1_FILES=(
   "data/brain/paper-trading.json"
   "data/brain/trade-log.md"
   "data/brain/backtest-framework.md"
+  "data/brain/heartbeat.md"
+  "data/brain/heartbeat-memory.md"
   "data/cron/jobs.json"
 )
 
