@@ -17,16 +17,17 @@ import type { BrainExportState } from './domain/brain/index.js'
 import { createBrowserTools } from './tool/browser.js'
 import { SymbolIndex } from './domain/market-data/equity/index.js'
 import { createEquityTools } from './tool/equity.js'
-import { getSDKExecutor, buildRouteMap, SDKEquityClient, SDKCryptoClient, SDKCurrencyClient } from './domain/market-data/client/typebb/index.js'
-import type { EquityClientLike, CryptoClientLike, CurrencyClientLike } from './domain/market-data/client/types.js'
+import { getSDKExecutor, buildRouteMap, SDKEquityClient, SDKCryptoClient, SDKCurrencyClient, SDKEtfClient, SDKIndexClient, SDKDerivativesClient, SDKCommodityClient } from './domain/market-data/client/typebb/index.js'
+import type { EquityClientLike, CryptoClientLike, CurrencyClientLike, EtfClientLike, IndexClientLike, DerivativesClientLike, CommodityClientLike } from './domain/market-data/client/types.js'
 import { buildSDKCredentials } from './domain/market-data/credential-map.js'
 import { OpenBBEquityClient } from './domain/market-data/client/openbb-api/equity-client.js'
 import { OpenBBCryptoClient } from './domain/market-data/client/openbb-api/crypto-client.js'
 import { OpenBBCurrencyClient } from './domain/market-data/client/openbb-api/currency-client.js'
+import { OpenBBCommodityClient } from './domain/market-data/client/openbb-api/commodity-client.js'
 import { OpenBBServerPlugin } from './server/opentypebb.js'
 import { createMarketSearchTools } from './tool/market.js'
 import { createAnalysisTools } from './tool/analysis.js'
-import { createWatchTools } from './tool/watch.js'
+import { createSessionTools } from './tool/session.js'
 import { SessionStore } from './core/session.js'
 import { ConnectorCenter } from './core/connector-center.js'
 import { ToolCenter } from './core/tool-center.js'
@@ -34,6 +35,7 @@ import { AgentCenter } from './core/agent-center.js'
 import { GenerateRouter } from './core/ai-provider-manager.js'
 import { VercelAIProvider } from './ai-providers/vercel-ai-sdk/vercel-provider.js'
 import { AgentSdkProvider } from './ai-providers/agent-sdk/agent-sdk-provider.js'
+import { CodexProvider } from './ai-providers/codex/index.js'
 import { createEventLog } from './core/event-log.js'
 import { createToolCallLog } from './core/tool-call-log.js'
 import { createCronEngine, createCronListener, createCronTools } from './task/cron/index.js'
@@ -49,6 +51,8 @@ const FRONTAL_LOBE_FILE = resolve('data/brain/frontal-lobe.md')
 const EMOTION_LOG_FILE = resolve('data/brain/emotion-log.md')
 const PERSONA_FILE = resolve('data/brain/persona.md')
 const PERSONA_DEFAULT = resolve('default/persona.default.md')
+const HEARTBEAT_FILE = resolve('data/brain/heartbeat.md')
+const HEARTBEAT_DEFAULT = resolve('default/heartbeat.default.md')
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
@@ -96,9 +100,10 @@ async function main() {
 
   // ==================== Brain ====================
 
-  const [brainExport, persona] = await Promise.all([
+  const [brainExport] = await Promise.all([
     readFile(BRAIN_FILE, 'utf-8').then((r) => JSON.parse(r) as BrainExportState).catch(() => undefined),
     readWithDefault(PERSONA_FILE, PERSONA_DEFAULT),
+    readWithDefault(HEARTBEAT_FILE, HEARTBEAT_DEFAULT),
   ])
 
   const brainDir = resolve('data/brain')
@@ -120,17 +125,21 @@ async function main() {
     ? Brain.restore(brainExport, { onCommit: brainOnCommit })
     : new Brain({ onCommit: brainOnCommit })
 
-  const frontalLobe = brain.getFrontalLobe()
-  const emotion = brain.getEmotion().current
-  const instructions = [
-    persona,
-    '---',
-    '## Current Brain State',
-    '',
-    `**Frontal Lobe:** ${frontalLobe || '(empty)'}`,
-    '',
-    `**Emotion:** ${emotion}`,
-  ].join('\n')
+  /** Re-read persona from disk + live brain state on each request. */
+  const getInstructions = async () => {
+    const persona = await readFile(PERSONA_FILE, 'utf-8').catch(() => '')
+    const frontalLobe = brain.getFrontalLobe()
+    const emotion = brain.getEmotion().current
+    return [
+      persona,
+      '---',
+      '## Current Brain State',
+      '',
+      `**Frontal Lobe:** ${frontalLobe || '(empty)'}`,
+      '',
+      `**Emotion:** ${emotion}`,
+    ].join('\n')
+  }
 
   // ==================== Cron ====================
 
@@ -151,6 +160,10 @@ async function main() {
   let equityClient: EquityClientLike
   let cryptoClient: CryptoClientLike
   let currencyClient: CurrencyClientLike
+  let commodityClient: CommodityClientLike
+  let etfClient: EtfClientLike | undefined
+  let indexClient: IndexClientLike | undefined
+  let derivativesClient: DerivativesClientLike | undefined
 
   if (config.marketData.backend === 'openbb-api') {
     const url = config.marketData.apiUrl
@@ -158,6 +171,7 @@ async function main() {
     equityClient = new OpenBBEquityClient(url, providers.equity, keys)
     cryptoClient = new OpenBBCryptoClient(url, providers.crypto, keys)
     currencyClient = new OpenBBCurrencyClient(url, providers.currency, keys)
+    commodityClient = new OpenBBCommodityClient(url, providers.equity, keys)
   } else {
     const executor = getSDKExecutor()
     const routeMap = buildRouteMap()
@@ -165,6 +179,10 @@ async function main() {
     equityClient = new SDKEquityClient(executor, 'equity', providers.equity, credentials, routeMap)
     cryptoClient = new SDKCryptoClient(executor, 'crypto', providers.crypto, credentials, routeMap)
     currencyClient = new SDKCurrencyClient(executor, 'currency', providers.currency, credentials, routeMap)
+    commodityClient = new SDKCommodityClient(executor, 'commodity', providers.equity, credentials, routeMap)
+    etfClient = new SDKEtfClient(executor, 'etf', providers.equity, credentials, routeMap)
+    indexClient = new SDKIndexClient(executor, 'index', providers.equity, credentials, routeMap)
+    derivativesClient = new SDKDerivativesClient(executor, 'derivatives', providers.equity, credentials, routeMap)
   }
 
   // OpenBB API server is started later via optionalPlugins
@@ -192,8 +210,7 @@ async function main() {
   if (config.news.enabled) {
     toolCenter.register(createNewsArchiveTools(newsStore), 'news')
   }
-  toolCenter.register(createAnalysisTools(equityClient, cryptoClient, currencyClient), 'analysis')
-  toolCenter.register(createWatchTools(), 'watch')
+  toolCenter.register(createAnalysisTools(equityClient, cryptoClient, currencyClient, commodityClient), 'analysis')
 
   console.log(`tool-center: ${toolCenter.list().length} tools registered`)
 
@@ -201,14 +218,18 @@ async function main() {
 
   const vercelProvider = new VercelAIProvider(
     () => toolCenter.getVercelTools(),
-    instructions,
+    getInstructions,
     config.agent.maxSteps,
   )
   const agentSdkProvider = new AgentSdkProvider(
     () => toolCenter.getVercelTools(),
-    instructions,
+    getInstructions,
   )
-  const router = new GenerateRouter(vercelProvider, agentSdkProvider)
+  const codexProvider = new CodexProvider(
+    () => toolCenter.getVercelTools(),
+    getInstructions,
+  )
+  const router = new GenerateRouter(vercelProvider, agentSdkProvider, codexProvider)
 
   const agentCenter = new AgentCenter({
     router,
@@ -220,16 +241,8 @@ async function main() {
 
   const connectorCenter = new ConnectorCenter(eventLog)
 
-  // ==================== Discord Webhook ====================
-
-  const discordCfg = config.connectors.discord
-  const discordWebhookUrl = (discordCfg.enabled && discordCfg.webhookUrl)
-    ? discordCfg.webhookUrl
-    : process.env.DISCORD_WEBHOOK_URL
-  if (discordWebhookUrl) {
-    connectorCenter.register(new DiscordWebhookConnector(discordWebhookUrl))
-    console.log('discord: webhook connector registered')
-  }
+  // Session awareness tools (registered here because they need connectorCenter)
+  toolCenter.register(createSessionTools(connectorCenter), 'session')
 
   // ==================== Cron Lifecycle ====================
 
@@ -387,6 +400,7 @@ async function main() {
 
   const ctx: EngineContext = {
     config, connectorCenter, agentCenter, eventLog, toolCallLog, heartbeat, cronEngine, toolCenter,
+    bbEngine: getSDKExecutor(),
     accountManager, snapshotService,
     reconnectConnectors,
   }

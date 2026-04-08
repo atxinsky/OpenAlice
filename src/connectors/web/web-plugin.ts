@@ -18,6 +18,7 @@ import { createTradingConfigRoutes } from './routes/trading-config.js'
 import { createDevRoutes } from './routes/dev.js'
 import { createToolsRoutes } from './routes/tools.js'
 import { createAgentStatusRoutes } from './routes/agent-status.js'
+import { createPersonaRoutes } from './routes/persona.js'
 
 export interface WebConfig {
   port: number
@@ -74,7 +75,7 @@ export class WebPlugin implements Plugin {
     app.route('/api/config', createConfigRoutes({
       onConnectorsChange: async () => { await ctx.reconnectConnectors() },
     }))
-    app.route('/api/market-data', createMarketDataRoutes())
+    app.route('/api/market-data', createMarketDataRoutes(ctx))
     app.route('/api/events', createEventsRoutes(ctx))
     app.route('/api/cron', createCronRoutes(ctx))
     app.route('/api/heartbeat', createHeartbeatRoutes(ctx))
@@ -83,6 +84,7 @@ export class WebPlugin implements Plugin {
     app.route('/api/dev', createDevRoutes(ctx.connectorCenter))
     app.route('/api/tools', createToolsRoutes(ctx.toolCenter))
     app.route('/api/agent-status', createAgentStatusRoutes(ctx))
+    app.route('/api/persona', createPersonaRoutes())
 
     // ==================== Serve UI (Vite build output) ====================
     const uiRoot = resolve('dist/ui')
